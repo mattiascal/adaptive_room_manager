@@ -70,3 +70,6 @@ DEFAULT_SLEEP_RESTORE_TRANSITION = 3.0
 
 STORAGE_VERSION = 1
 STORAGE_KEY_PREFIX = f"{DOMAIN}.sleep"
+
+# Label id: lights carrying it are never switched off by the vacancy Area sweep.
+AREA_OFF_EXCLUDE_LABEL = "arm_exclude"

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.5
+
+- Fixed room lights staying on after vacancy when they were already on at the start of an occupancy cycle (switched on by hand, by another automation, or left on). Lights of the active profile that are already on are now adopted and switched off when the room becomes vacant.
+- The set of lights ARM switches off on vacancy is now persisted. After a Home Assistant restart, if those lights are still on, the occupancy cycle resumes and the normal absence delay switches them off once the room is empty.
+- On vacancy (outside Sleep mode) ARM also switches off lights of the room's Area that were switched on during the cycle by hand, by an app or by another automation, even if they are not configured in any profile. Lights that were never switched on are left alone. Area membership follows the entity's Area or, if unset, its device's Area. Light groups, config/diagnostic light entities and lights labelled `arm_exclude` are ignored. The tracked set is persisted across restarts.
+
 ## 0.6.4
 
 - Added persistent storage for the last known state of every light managed by a room.
