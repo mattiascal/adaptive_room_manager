@@ -7,6 +7,8 @@
 - If lighting is not needed, all managed lights are switched off and presence stays active.
 - The stored natural illuminance is refreshed when Sleep mode ends instead of reusing the value from the evening before; if that reading was inflated by the sleep lights it is sampled again once they are off.
 - Automatic Sleep mode exit on vacancy still switches everything off without assuming presence.
+- A light of the room switched on by hand while the room is occupied now counts as a request for lighting: for the rest of the occupancy cycle lighting is considered needed (Lighting reason: `Light switched on manually`) and the current profile is applied if it was not yet. A light switched on by hand during Sleep mode makes the profile lights come on when Sleep mode ends. Lights switched on by ARM itself or by another automation or script do not count. Cleared on vacancy and when Sleep mode starts.
+- The wait before a lux reading counts as natural after a light goes off is now 5 seconds (was 30). Sensors that report only on motion or every several minutes simply update the stored value at their next report.
 
 ## 0.6.7
 

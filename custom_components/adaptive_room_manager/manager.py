@@ -81,6 +81,7 @@ from .const import (
     DEFAULT_SYNC_ENTER_EVENING,
     DEFAULT_SYNC_ENTER_NIGHT,
     DOMAIN,
+    ARM_COMMAND_WINDOW_SECONDS,
     ENTRY_TYPE_HOME,
     LUX_SETTLE_SECONDS,
     SLEEP_COLOR_RGB,
@@ -130,6 +131,13 @@ class RoomManager:
         # unavailable) while the room is vacant.
         self._orphan_sweep_cancel = None
         self._sleep_profile_applied = False
+        # Someone switched a light on by hand during this occupancy cycle (or
+        # during Sleep mode): the room is too dark for them, whatever the lux
+        # sensor says. Cleared on vacancy and when Sleep mode starts.
+        self.manual_light_request = False
+        # Lights ARM itself just asked to switch on, with the expiry of that
+        # expectation, so its own commands are not mistaken for manual ones.
+        self._expected_on: dict[str, float] = {}
         # A normal Day/Evening/Night profile is applied at most once during an
         # occupancy cycle. This prevents a light switched off by the user from
         # being turned back on by later sensor/lux/state evaluations.
@@ -469,6 +477,8 @@ class RoomManager:
         # example while Home Assistant or its integration restarted) is tracked
         # like one that was switched on.
         returned = old is None or old.state in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+        if not returned:
+            self._note_manual_switch_on(entity_id, new)
         if (
             entity_id in self._area_light_ids
             and entity_id not in self.auto_lights
@@ -478,6 +488,33 @@ class RoomManager:
             self._schedule_persistent_state_save()
         if returned:
             self._schedule_orphan_sweep()
+
+    def _expect_on(self, entity_ids) -> None:
+        """Remember lights ARM is switching on itself."""
+        expiry = self.hass.loop.time() + ARM_COMMAND_WINDOW_SECONDS
+        for entity_id in entity_ids:
+            self._expected_on[entity_id] = expiry
+
+    @callback
+    def _note_manual_switch_on(self, entity_id: str, new_state) -> None:
+        """Treat a light switched on by hand as a request for lighting.
+
+        Only while the room is occupied. Lights switched on by ARM, by another
+        automation or script (their context has a parent), or while ARM replays
+        the light states after a restart, do not count.
+        """
+        expiry = self._expected_on.pop(entity_id, None)
+        if expiry is not None and self.hass.loop.time() <= expiry:
+            return
+        if self._restoring_lights or not self.occupied or self.manual_light_request:
+            return
+        context = getattr(new_state, "context", None)
+        if getattr(context, "parent_id", None) is not None:
+            return
+        self.manual_light_request = True
+        if entity_id not in self._all_lights():
+            # Profile lights are evaluated by their own state listener.
+            self.hass.async_create_task(self.async_evaluate(entity_id))
 
     @callback
     def _schedule_orphan_sweep(self) -> None:
@@ -667,6 +704,7 @@ class RoomManager:
                     data[ATTR_HS_COLOR] = saved[ATTR_HS_COLOR]
                 elif saved.get(ATTR_COLOR_TEMP_KELVIN) is not None:
                     data[ATTR_COLOR_TEMP_KELVIN] = saved[ATTR_COLOR_TEMP_KELVIN]
+                self._expect_on([entity_id])
                 await self.hass.services.async_call(
                     "light", "turn_on", data, blocking=True
                 )
@@ -755,6 +793,7 @@ class RoomManager:
 
     async def _enter_sleep_mode(self) -> None:
         self.sleep_mode = True
+        self.manual_light_request = False
         # Snapshot only entities that will actually receive a sleep-mode command.
         self._sleep_snapshot = self._capture_sleep_snapshot()
         self.sleep_reason = "Enabled by the room Sleep mode switch"
@@ -803,6 +842,7 @@ class RoomManager:
                     blocking=False,
                 )
             if desired:
+                self._expect_on(desired)
                 # A bare turn_on, as on any room entry: brightness and color are
                 # left to the light itself or to Adaptive Lighting.
                 await self.hass.services.async_call(
@@ -899,6 +939,7 @@ class RoomManager:
                 data[ATTR_RGB_COLOR] = profile[CONF_SLEEP_RGB_COLOR]
             elif color_mode == SLEEP_COLOR_TEMP and profile.get(CONF_SLEEP_COLOR_TEMP):
                 data[ATTR_COLOR_TEMP_KELVIN] = int(profile[CONF_SLEEP_COLOR_TEMP])
+            self._expect_on([entity_id])
             await self.hass.services.async_call("light", "turn_on", data, blocking=False)
 
     async def _turn_off_all_lights(self, transition: float = 0) -> None:
@@ -917,6 +958,7 @@ class RoomManager:
         # The next Vacant -> Occupied transition starts a fresh lighting cycle.
         self._lighting_profile_applied = False
         self.manual_overrides.clear()
+        self.manual_light_request = False
         if self.sleep_mode:
             await self._turn_off_all_lights(
                 float(self.config.get(CONF_SLEEP_TRANSITION, DEFAULT_SLEEP_TRANSITION))
@@ -1056,6 +1098,10 @@ class RoomManager:
             self.light_needed = not (any_open and elevation > 3)
             self.light_reason = "Cover and sun fallback"
 
+        if self.manual_light_request and not self.light_needed:
+            self.light_needed = True
+            self.light_reason = "Light switched on manually"
+
     def _store_natural_lux(self, measured: float) -> None:
         """Store a natural lux reading, rounded and rate limited.
 
@@ -1168,6 +1214,7 @@ class RoomManager:
 
         auto_before = set(self.auto_lights)
         if to_on:
+            self._expect_on(to_on)
             await self.hass.services.async_call(
                 "light", "turn_on", {ATTR_ENTITY_ID: list(to_on)}, blocking=False
             )

@@ -74,7 +74,10 @@ DEFAULT_SLEEP_TRANSITION = 3.0
 DEFAULT_SLEEP_RESTORE_TRANSITION = 3.0
 
 # Seconds to wait after a light went off before a lux reading counts as natural.
-LUX_SETTLE_SECONDS = 30
+LUX_SETTLE_SECONDS = 5
+
+# Seconds during which a light coming on is attributed to ARM's own command.
+ARM_COMMAND_WINDOW_SECONDS = 15
 
 STORAGE_VERSION = 1
 STORAGE_KEY_PREFIX = f"{DOMAIN}.sleep"
