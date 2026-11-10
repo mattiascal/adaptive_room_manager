@@ -19,6 +19,8 @@ from .const import (
     CONF_EVENING_START,
     CONF_LUX,
     CONF_LUX_THRESHOLD,
+    CONF_LUX_PRECISION,
+    CONF_LUX_UPDATE_INTERVAL,
     CONF_MORNING_START,
     CONF_NIGHT_LIGHTS,
     CONF_NIGHT_START,
@@ -41,6 +43,8 @@ from .const import (
     DEFAULT_ABSENCE_DELAY,
     DEFAULT_EVENING_START,
     DEFAULT_LUX_THRESHOLD,
+    DEFAULT_LUX_PRECISION,
+    DEFAULT_LUX_UPDATE_INTERVAL,
     DEFAULT_MORNING_START,
     DEFAULT_NIGHT_START,
     DEFAULT_SLEEP_ABSENCE_DELAY,
@@ -96,6 +100,28 @@ def _home_schema(defaults: dict[str, Any]) -> vol.Schema:
                     min=0,
                     max=7200,
                     step=10,
+                    unit_of_measurement="s",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Required(
+                CONF_LUX_PRECISION,
+                default=defaults.get(CONF_LUX_PRECISION, DEFAULT_LUX_PRECISION),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0, max=2, step=1, mode=selector.NumberSelectorMode.BOX
+                )
+            ),
+            vol.Required(
+                CONF_LUX_UPDATE_INTERVAL,
+                default=defaults.get(
+                    CONF_LUX_UPDATE_INTERVAL, DEFAULT_LUX_UPDATE_INTERVAL
+                ),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=3600,
+                    step=30,
                     unit_of_measurement="s",
                     mode=selector.NumberSelectorMode.BOX,
                 )

@@ -28,7 +28,7 @@ Any sensor becoming active before the delay expires cancels the timer. The room 
 
 ## Natural-light model
 
-Natural illuminance is sampled only while all managed lights are off. The latest valid average is retained and compared with the room lux threshold. The integration never switches lights off temporarily to measure lux.
+Natural illuminance is sampled only while all managed lights are off. The latest valid average is retained and compared with the room lux threshold. The retained value is rounded to **Stored lux decimals** and changes at most once per **Stored lux update interval** (Home Settings, default whole lux and 300 s); a reading that crosses the room threshold is retained immediately. The integration never switches lights off temporarily to measure lux.
 
 When no retained lux value exists, covers and sun elevation provide a fallback:
 

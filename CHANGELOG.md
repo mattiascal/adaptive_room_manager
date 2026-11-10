@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.7
+
+- Stored natural illuminance is rounded and rate limited, so small sensor fluctuations (e.g. 6.1 ↔ 6.3 lx) no longer update the Lighting reason and Stored natural illuminance sensors every few seconds and flood the recorder.
+- New Home Settings: **Stored lux decimals** (default 0, whole lux) and **Stored lux update interval** (default 300 s). A reading that crosses a room lux threshold is always stored at once, so lighting decisions are not delayed.
+- Manifest documentation and issue tracker now point to `mattiascal/adaptive_room_manager`.
+
 ## 0.6.6
 
 - Leaving Sleep mode with no presence sensor active now ends the occupancy cycle immediately: the room was only being held by the Sleep absence delay, so all managed lights (and tracked Area lights) are switched off instead of being restored or switched on for an empty room.

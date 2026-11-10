@@ -18,14 +18,18 @@
           "night_start": "Night starts",
           "morning_start": "Morning starts",
           "lux_threshold": "Default illuminance threshold",
-          "absence_delay": "Default absence delay"
+          "absence_delay": "Default absence delay",
+          "lux_precision": "Stored lux decimals",
+          "natural_lux_update_interval": "Stored lux update interval"
         },
         "data_description": {
           "evening_start": "Start of the global Evening lighting period.",
           "night_start": "Start of the global Night lighting period.",
           "morning_start": "End of the global Night period and start of Day.",
           "lux_threshold": "Initial threshold copied to newly created rooms.",
-          "absence_delay": "Initial absence delay copied to newly created rooms."
+          "absence_delay": "Initial absence delay copied to newly created rooms.",
+          "lux_precision": "Decimals kept for the stored natural illuminance (0 = whole lux). Small sensor fluctuations below this resolution are ignored.",
+          "natural_lux_update_interval": "Minimum time between two changes of the stored natural illuminance. A reading that crosses a room threshold is always stored at once. 0 = no limit."
         }
       },
       "room": {
@@ -85,14 +89,18 @@
           "night_start": "Night starts",
           "morning_start": "Morning starts",
           "lux_threshold": "Default illuminance threshold",
-          "absence_delay": "Default absence delay"
+          "absence_delay": "Default absence delay",
+          "lux_precision": "Stored lux decimals",
+          "natural_lux_update_interval": "Stored lux update interval"
         },
         "data_description": {
           "evening_start": "Start of the global Evening lighting period.",
           "night_start": "Start of the global Night lighting period.",
           "morning_start": "End of the global Night period and start of Day.",
           "lux_threshold": "Initial threshold for rooms created later. Existing room thresholds are not overwritten.",
-          "absence_delay": "Initial delay for rooms created later. Existing room delays are not overwritten."
+          "absence_delay": "Initial delay for rooms created later. Existing room delays are not overwritten.",
+          "lux_precision": "Decimals kept for the stored natural illuminance (0 = whole lux). Small sensor fluctuations below this resolution are ignored.",
+          "natural_lux_update_interval": "Minimum time between two changes of the stored natural illuminance. A reading that crosses a room threshold is always stored at once. 0 = no limit."
         }
       },
       "room": {

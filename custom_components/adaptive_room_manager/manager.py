@@ -45,6 +45,8 @@ from .const import (
     CONF_EVENING_START,
     CONF_LUX,
     CONF_LUX_THRESHOLD,
+    CONF_LUX_PRECISION,
+    CONF_LUX_UPDATE_INTERVAL,
     CONF_MORNING_START,
     CONF_NIGHT_LIGHTS,
     CONF_NIGHT_START,
@@ -67,6 +69,8 @@ from .const import (
     DEFAULT_ABSENCE_DELAY,
     DEFAULT_EVENING_START,
     DEFAULT_LUX_THRESHOLD,
+    DEFAULT_LUX_PRECISION,
+    DEFAULT_LUX_UPDATE_INTERVAL,
     DEFAULT_MORNING_START,
     DEFAULT_NIGHT_START,
     DEFAULT_SLEEP_ABSENCE_DELAY,
@@ -102,6 +106,8 @@ class RoomManager:
         self.enabled = True
         self.mode = "automatic"
         self.last_natural_lux: float | None = None
+        # Loop time of the last change of last_natural_lux (rate limiting).
+        self._lux_stored_at: float | None = None
         self.auto_lights: set[str] = set()
         # Area lights switched on during the cycle by anyone other than ARM's
         # profile (by hand, app, other automations). Switched off only on vacancy.
@@ -176,6 +182,28 @@ class RoomManager:
     @property
     def lux_threshold(self) -> float:
         return float(self.config.get(CONF_LUX_THRESHOLD, DEFAULT_LUX_THRESHOLD))
+
+    @property
+    def lux_precision(self) -> int:
+        """Decimals kept for the stored natural illuminance (Home Settings)."""
+        try:
+            value = int(self.home_config.get(CONF_LUX_PRECISION, DEFAULT_LUX_PRECISION))
+        except (TypeError, ValueError):
+            value = DEFAULT_LUX_PRECISION
+        return max(0, min(2, value))
+
+    @property
+    def lux_update_interval(self) -> int:
+        """Minimum seconds between two changes of the stored natural lux."""
+        try:
+            value = int(
+                self.home_config.get(
+                    CONF_LUX_UPDATE_INTERVAL, DEFAULT_LUX_UPDATE_INTERVAL
+                )
+            )
+        except (TypeError, ValueError):
+            value = DEFAULT_LUX_UPDATE_INTERVAL
+        return max(0, value)
 
     @property
     def entities(self) -> list[str]:
@@ -994,7 +1022,7 @@ class RoomManager:
 
         lux_settled = self.hass.loop.time() >= self._lux_settle_until
         if not lights_on and lux_values and lux_settled:
-            self.last_natural_lux = sum(lux_values) / len(lux_values)
+            self._store_natural_lux(sum(lux_values) / len(lux_values))
 
         valid_covers = []
         for entity_id in self.config.get(CONF_COVERS, []):
@@ -1015,10 +1043,39 @@ class RoomManager:
             self.light_reason = "Night profile"
         elif self.last_natural_lux is not None:
             self.light_needed = self.last_natural_lux < self.lux_threshold
-            self.light_reason = f"Stored natural lux: {self.last_natural_lux:.1f} lx"
+            self.light_reason = (
+                f"Stored natural lux: {self.last_natural_lux:.{self.lux_precision}f} lx"
+            )
         else:
             self.light_needed = not (any_open and elevation > 3)
             self.light_reason = "Cover and sun fallback"
+
+    def _store_natural_lux(self, measured: float) -> None:
+        """Store a natural lux reading, rounded and rate limited.
+
+        The value is rounded to the Home Settings precision and changes at most
+        once per update interval, so small sensor fluctuations do not flood the
+        recorder. A reading that crosses the room lux threshold is stored at
+        once, so the lighting decision is never delayed.
+        """
+        decimals = self.lux_precision
+        value = round(measured, decimals)
+        if decimals == 0:
+            value = float(int(value))
+        stored = self.last_natural_lux
+        if stored is not None and value == stored:
+            return
+        now = self.hass.loop.time()
+        threshold = self.lux_threshold
+        crosses = stored is not None and (stored < threshold) != (value < threshold)
+        due = (
+            stored is None
+            or self._lux_stored_at is None
+            or now - self._lux_stored_at >= self.lux_update_interval
+        )
+        if due or crosses:
+            self.last_natural_lux = value
+            self._lux_stored_at = now
 
     async def async_evaluate(
         self, changed: str | None = None, *, period_boundary: bool = False

@@ -4,7 +4,7 @@ DOMAIN = "adaptive_room_manager"
 NAME = "Adaptive Room Manager"
 MANUFACTURER = "Adaptive Room Manager"
 MODEL = "Adaptive Room"
-VERSION = "0.6.6"
+VERSION = "0.6.7"
 PLATFORMS = ["binary_sensor", "sensor", "switch", "number", "select"]
 
 CONF_ENTRY_TYPE = "entry_type"
@@ -28,6 +28,9 @@ CONF_NIGHT_START = "night_start"
 CONF_MORNING_START = "morning_start"
 CONF_LUX_THRESHOLD = "lux_threshold"
 CONF_ABSENCE_DELAY = "absence_delay"
+# Home Settings: how the stored natural illuminance is recorded.
+CONF_LUX_PRECISION = "lux_precision"
+CONF_LUX_UPDATE_INTERVAL = "natural_lux_update_interval"
 
 # Period transition behavior. When enabled for the period being entered, the
 # room synchronizes managed lighting by turning off lights outside that profile.
@@ -63,6 +66,8 @@ DEFAULT_NIGHT_START = "22:30:00"
 DEFAULT_MORNING_START = "07:00:00"
 DEFAULT_LUX_THRESHOLD = 40.0
 DEFAULT_ABSENCE_DELAY = 600
+DEFAULT_LUX_PRECISION = 0
+DEFAULT_LUX_UPDATE_INTERVAL = 300
 DEFAULT_SLEEP_ABSENCE_DELAY = 30
 DEFAULT_SLEEP_AUTO_OFF = False
 DEFAULT_SLEEP_TRANSITION = 3.0
