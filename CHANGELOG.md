@@ -2,8 +2,11 @@
 
 ## 0.6.8
 
-- Leaving Sleep mode with no presence sensor active no longer clears presence at once (0.6.6). The room stays occupied and the normal absence delay starts: if nobody is detected before it expires, presence clears and the lights are switched off as on any vacancy. Meanwhile nothing is restored or switched on for the empty room.
-- If someone is detected during that delay, Sleep mode exit is completed the usual way: the pre-sleep state of the lights is restored and the current Day/Evening/Night profile applies when lighting is needed, otherwise the lights are switched off.
+- Switching Sleep mode off now resumes the room's normal lighting rules, as if someone had just entered. The room is occupied and a fresh lighting cycle starts; with no presence sensor active the normal absence delay runs and vacancy switches the lights off as usual. This replaces the 0.6.6 behavior (presence cleared at once when no sensor was active).
+- If lighting is needed, the lights that are not part of the current Day/Evening/Night profile are switched off and the profile lights are switched on with a plain `light.turn_on`, so Adaptive Lighting (or the light itself) decides brightness and color. The pre-sleep state of the lights is no longer restored.
+- If lighting is not needed, all managed lights are switched off and presence stays active.
+- The stored natural illuminance is refreshed when Sleep mode ends instead of reusing the value from the evening before; if that reading was inflated by the sleep lights it is sampled again once they are off.
+- Automatic Sleep mode exit on vacancy still switches everything off without assuming presence.
 
 ## 0.6.7
 

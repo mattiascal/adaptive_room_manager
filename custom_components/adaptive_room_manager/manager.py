@@ -130,10 +130,6 @@ class RoomManager:
         # unavailable) while the room is vacant.
         self._orphan_sweep_cancel = None
         self._sleep_profile_applied = False
-        # Sleep mode was switched off while no presence sensor was active: the
-        # lights are left untouched until someone is detected or the normal
-        # absence delay expires.
-        self._sleep_exit_pending = False
         # A normal Day/Evening/Night profile is applied at most once during an
         # occupancy cycle. This prevents a light switched off by the user from
         # being turned back on by later sensor/lux/state evaluations.
@@ -745,19 +741,20 @@ class RoomManager:
                 snapshot[entity_id] = saved
         return snapshot
 
-    async def async_set_sleep_mode(self, enabled: bool) -> None:
+    async def async_set_sleep_mode(
+        self, enabled: bool, *, assume_present: bool = True
+    ) -> None:
         if enabled == self.sleep_mode:
             return
         self._cancel_absence_timer()
         if enabled:
             await self._enter_sleep_mode()
         else:
-            await self._exit_sleep_mode()
+            await self._exit_sleep_mode(assume_present=assume_present)
         await self.async_evaluate()
 
     async def _enter_sleep_mode(self) -> None:
         self.sleep_mode = True
-        self._sleep_exit_pending = False
         # Snapshot only entities that will actually receive a sleep-mode command.
         self._sleep_snapshot = self._capture_sleep_snapshot()
         self.sleep_reason = "Enabled by the room Sleep mode switch"
@@ -765,53 +762,62 @@ class RoomManager:
         await self._apply_sleep_profile()
         self._sleep_profile_applied = True
 
-    async def _exit_sleep_mode(self) -> None:
+    async def _exit_sleep_mode(self, *, assume_present: bool = True) -> None:
+        """Leave Sleep mode and resume the normal lighting rules.
+
+        Switching Sleep mode off is treated like someone entering the room: the
+        room is occupied, a fresh lighting cycle starts and, when no presence
+        sensor is active, the caller's evaluation starts the normal absence
+        delay. Sleep lights outside the current Day/Evening/Night profile are
+        switched off; the profile lights are switched on if lighting is needed,
+        otherwise everything is switched off while presence stays active.
+        """
         self.sleep_mode = False
         self.sleep_reason = "Sleep mode inactive"
         self._sleep_profile_applied = False
         self._update_presence(schedule_timer=False)
+        if assume_present and not self.occupied:
+            self.occupied = True
+            self.presence_reason = "Sleep mode ended"
+        self.manual_overrides.clear()
 
-        triggers, persistent = self._active_presence()
-        if self.occupied and not (triggers or persistent):
-            # The room is only being held by the (long) sleep absence delay.
-            # Presence is not cleared here: the caller's evaluation starts the
-            # normal absence delay. Until someone is detected or that delay
-            # expires nothing is restored or switched on; the lights that are
-            # on are tracked so vacancy switches them off.
-            self._sleep_exit_pending = True
-            self._lighting_profile_applied = True
-            self.auto_lights.update(self._lights_on() - self.manual_overrides)
-            await self._save_sleep_state()
-            return
-
+        self._sample_lux_leaving_sleep()
         self._update_light_need()
-        await self._apply_sleep_exit_lighting()
+        transition = float(self.config.get(
+            CONF_SLEEP_RESTORE_TRANSITION,
+            DEFAULT_SLEEP_RESTORE_TRANSITION,
+        ))
 
-    async def _apply_sleep_exit_lighting(self) -> None:
-        """Restore or switch off the lights once Sleep mode has ended."""
         if self.occupied and self.light_needed:
-            await self._restore_light_snapshot()
-            # Whatever stays on after Sleep mode belongs to this occupancy cycle
-            # and is switched off on vacancy, also when Sleep mode itself (or a
-            # restart during the night) had dropped it from the tracked set.
-            restored_on = {
-                entity_id
-                for entity_id, saved in self._sleep_snapshot.items()
-                if saved.get("state") == STATE_ON
+            groups = {
+                "day": CONF_DAY_LIGHTS,
+                "evening": CONF_EVENING_LIGHTS,
+                "night": CONF_NIGHT_LIGHTS,
             }
-            restored_off = set(self._sleep_snapshot) - restored_on
-            self.auto_lights.update(
-                ((self._lights_on() | restored_on) - restored_off)
-                - self.manual_overrides
-            )
+            desired = set(self.config.get(groups[self.period()], []))
+            to_off = self._lights_on() - desired
+            if to_off:
+                await self.hass.services.async_call(
+                    "light", "turn_off",
+                    {ATTR_ENTITY_ID: list(to_off), "transition": transition},
+                    blocking=False,
+                )
+            if desired:
+                # A bare turn_on, as on any room entry: brightness and color are
+                # left to the light itself or to Adaptive Lighting.
+                await self.hass.services.async_call(
+                    "light", "turn_on",
+                    {ATTR_ENTITY_ID: list(desired), "transition": transition},
+                    blocking=False,
+                )
+            self.auto_lights = set(desired)
+            self._lighting_profile_applied = True
             self._schedule_persistent_state_save()
-            self.light_reason = "Restored pre-sleep state of changed lights"
         else:
-            transition = float(self.config.get(
-                CONF_SLEEP_RESTORE_TRANSITION,
-                DEFAULT_SLEEP_RESTORE_TRANSITION,
-            ))
             await self._turn_off_all_lights(transition)
+            # Presence stays active: if it gets dark during this cycle the
+            # profile is applied as usual.
+            self._lighting_profile_applied = False
             if not self.occupied and self.enabled and self.mode != "disabled":
                 # Same Area sweep as a normal vacancy.
                 leftover = {
@@ -826,10 +832,33 @@ class RoomManager:
                         {ATTR_ENTITY_ID: list(leftover), "transition": transition},
                         blocking=False,
                     )
-            self.light_reason = "Sleep ended; lighting not needed"
 
         self._sleep_snapshot = {}
         await self._save_sleep_state()
+
+    def _sample_lux_leaving_sleep(self) -> None:
+        """Refresh the stored lux when Sleep mode ends.
+
+        The stored value is usually from the evening before and says nothing
+        about the room now. The current reading may include the (dim) sleep
+        lights, so it is an upper bound: below the threshold it is conclusive,
+        above it the real value is sampled again once the lights are off.
+        """
+        lux_values: list[float] = []
+        for entity_id in self.config.get(CONF_LUX, []):
+            state = self.hass.states.get(entity_id)
+            try:
+                lux_values.append(float(state.state))
+            except (TypeError, ValueError, AttributeError):
+                continue
+        if not lux_values:
+            return
+        decimals = self.lux_precision
+        value = round(sum(lux_values) / len(lux_values), decimals)
+        if decimals == 0:
+            value = float(int(value))
+        self.last_natural_lux = value
+        self._lux_stored_at = self.hass.loop.time()
 
     async def _apply_sleep_profile(self) -> None:
         profiles = self.config.get(CONF_SLEEP_LIGHT_PROFILES, {})
@@ -872,39 +901,6 @@ class RoomManager:
                 data[ATTR_COLOR_TEMP_KELVIN] = int(profile[CONF_SLEEP_COLOR_TEMP])
             await self.hass.services.async_call("light", "turn_on", data, blocking=False)
 
-    async def _restore_light_snapshot(self) -> None:
-        transition = float(
-            self.config.get(
-                CONF_SLEEP_RESTORE_TRANSITION, DEFAULT_SLEEP_RESTORE_TRANSITION
-            )
-        )
-        for entity_id, saved in self._sleep_snapshot.items():
-            if saved.get("state") != STATE_ON:
-                await self.hass.services.async_call(
-                    "light", "turn_off",
-                    {ATTR_ENTITY_ID: entity_id, "transition": transition},
-                    blocking=False,
-                )
-                continue
-            data: dict[str, Any] = {
-                ATTR_ENTITY_ID: entity_id,
-                "transition": transition,
-            }
-            if saved.get(ATTR_BRIGHTNESS) is not None:
-                data[ATTR_BRIGHTNESS] = saved[ATTR_BRIGHTNESS]
-            color_mode = saved.get(ATTR_COLOR_MODE)
-            if saved.get(ATTR_RGB_COLOR) is not None and color_mode in (
-                "rgb", "rgbw", "rgbww"
-            ):
-                data[ATTR_RGB_COLOR] = saved[ATTR_RGB_COLOR]
-            elif saved.get(ATTR_XY_COLOR) is not None and color_mode == "xy":
-                data[ATTR_XY_COLOR] = saved[ATTR_XY_COLOR]
-            elif saved.get(ATTR_HS_COLOR) is not None and color_mode == "hs":
-                data[ATTR_HS_COLOR] = saved[ATTR_HS_COLOR]
-            elif saved.get(ATTR_COLOR_TEMP_KELVIN) is not None:
-                data[ATTR_COLOR_TEMP_KELVIN] = saved[ATTR_COLOR_TEMP_KELVIN]
-            await self.hass.services.async_call("light", "turn_on", data, blocking=False)
-
     async def _turn_off_all_lights(self, transition: float = 0) -> None:
         lights = self._all_lights()
         if not lights:
@@ -921,20 +917,14 @@ class RoomManager:
         # The next Vacant -> Occupied transition starts a fresh lighting cycle.
         self._lighting_profile_applied = False
         self.manual_overrides.clear()
-        if self._sleep_exit_pending:
-            # Nobody showed up after Sleep mode ended: drop the pre-sleep state.
-            self._sleep_exit_pending = False
-            self._sleep_snapshot = {}
-            self._schedule_persistent_state_save()
         if self.sleep_mode:
             await self._turn_off_all_lights(
                 float(self.config.get(CONF_SLEEP_TRANSITION, DEFAULT_SLEEP_TRANSITION))
             )
             if self.sleep_auto_off:
-                # Keep the snapshot until _exit_sleep_mode has made its occupied/light
-                # decision. As the room is vacant, it will switch all lights off and
-                # then clear the snapshot without restoring it.
-                await self.async_set_sleep_mode(False)
+                # The room is vacant: leave Sleep mode without assuming presence,
+                # so all lights are switched off and no absence delay restarts.
+                await self.async_set_sleep_mode(False, assume_present=False)
                 return
         else:
             await self.async_apply()
@@ -1104,15 +1094,6 @@ class RoomManager:
 
         self._update_presence()
         self._update_light_need()
-
-        if self._sleep_exit_pending and self.occupied and not self.sleep_mode:
-            triggers, persistent = self._active_presence()
-            if triggers or persistent:
-                # Someone is in the room after all: finish leaving Sleep mode
-                # the usual way and let the current profile apply.
-                self._sleep_exit_pending = False
-                self._lighting_profile_applied = False
-                await self._apply_sleep_exit_lighting()
 
         if self.sleep_mode:
             self.sleep_reason = "Enabled by the room Sleep mode switch"
