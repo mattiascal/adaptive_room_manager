@@ -130,6 +130,10 @@ class RoomManager:
         # unavailable) while the room is vacant.
         self._orphan_sweep_cancel = None
         self._sleep_profile_applied = False
+        # Sleep mode was switched off while no presence sensor was active: the
+        # lights are left untouched until someone is detected or the normal
+        # absence delay expires.
+        self._sleep_exit_pending = False
         # A normal Day/Evening/Night profile is applied at most once during an
         # occupancy cycle. This prevents a light switched off by the user from
         # being turned back on by later sensor/lux/state evaluations.
@@ -753,6 +757,7 @@ class RoomManager:
 
     async def _enter_sleep_mode(self) -> None:
         self.sleep_mode = True
+        self._sleep_exit_pending = False
         # Snapshot only entities that will actually receive a sleep-mode command.
         self._sleep_snapshot = self._capture_sleep_snapshot()
         self.sleep_reason = "Enabled by the room Sleep mode switch"
@@ -768,16 +773,22 @@ class RoomManager:
 
         triggers, persistent = self._active_presence()
         if self.occupied and not (triggers or persistent):
-            # The room was only being held by the (long) sleep absence delay.
-            # With no sensor active it is empty: end the occupancy cycle now
-            # instead of restoring lights for nobody.
-            self.occupied = False
-            self.presence_reason = "Sleep ended with no active presence sensors"
-            self._lighting_profile_applied = False
-            self.manual_overrides.clear()
+            # The room is only being held by the (long) sleep absence delay.
+            # Presence is not cleared here: the caller's evaluation starts the
+            # normal absence delay. Until someone is detected or that delay
+            # expires nothing is restored or switched on; the lights that are
+            # on are tracked so vacancy switches them off.
+            self._sleep_exit_pending = True
+            self._lighting_profile_applied = True
+            self.auto_lights.update(self._lights_on() - self.manual_overrides)
+            await self._save_sleep_state()
+            return
 
         self._update_light_need()
+        await self._apply_sleep_exit_lighting()
 
+    async def _apply_sleep_exit_lighting(self) -> None:
+        """Restore or switch off the lights once Sleep mode has ended."""
         if self.occupied and self.light_needed:
             await self._restore_light_snapshot()
             # Whatever stays on after Sleep mode belongs to this occupancy cycle
@@ -910,6 +921,11 @@ class RoomManager:
         # The next Vacant -> Occupied transition starts a fresh lighting cycle.
         self._lighting_profile_applied = False
         self.manual_overrides.clear()
+        if self._sleep_exit_pending:
+            # Nobody showed up after Sleep mode ended: drop the pre-sleep state.
+            self._sleep_exit_pending = False
+            self._sleep_snapshot = {}
+            self._schedule_persistent_state_save()
         if self.sleep_mode:
             await self._turn_off_all_lights(
                 float(self.config.get(CONF_SLEEP_TRANSITION, DEFAULT_SLEEP_TRANSITION))
@@ -1088,6 +1104,15 @@ class RoomManager:
 
         self._update_presence()
         self._update_light_need()
+
+        if self._sleep_exit_pending and self.occupied and not self.sleep_mode:
+            triggers, persistent = self._active_presence()
+            if triggers or persistent:
+                # Someone is in the room after all: finish leaving Sleep mode
+                # the usual way and let the current profile apply.
+                self._sleep_exit_pending = False
+                self._lighting_profile_applied = False
+                await self._apply_sleep_exit_lighting()
 
         if self.sleep_mode:
             self.sleep_reason = "Enabled by the room Sleep mode switch"

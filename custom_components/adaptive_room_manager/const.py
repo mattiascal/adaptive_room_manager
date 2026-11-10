@@ -4,7 +4,7 @@ DOMAIN = "adaptive_room_manager"
 NAME = "Adaptive Room Manager"
 MANUFACTURER = "Adaptive Room Manager"
 MODEL = "Adaptive Room"
-VERSION = "0.6.7"
+VERSION = "0.6.8"
 PLATFORMS = ["binary_sensor", "sensor", "switch", "number", "select"]
 
 CONF_ENTRY_TYPE = "entry_type"

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.8
+
+- Leaving Sleep mode with no presence sensor active no longer clears presence at once (0.6.6). The room stays occupied and the normal absence delay starts: if nobody is detected before it expires, presence clears and the lights are switched off as on any vacancy. Meanwhile nothing is restored or switched on for the empty room.
+- If someone is detected during that delay, Sleep mode exit is completed the usual way: the pre-sleep state of the lights is restored and the current Day/Evening/Night profile applies when lighting is needed, otherwise the lights are switched off.
+
 ## 0.6.7
 
 - Stored natural illuminance is rounded and rate limited, so small sensor fluctuations (e.g. 6.1 ↔ 6.3 lx) no longer update the Lighting reason and Stored natural illuminance sensors every few seconds and flood the recorder.
