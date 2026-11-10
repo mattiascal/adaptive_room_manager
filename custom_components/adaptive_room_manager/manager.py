@@ -87,8 +87,12 @@ from .const import (
     ENTRY_TYPE_HOME,
     LUX_SETTLE_SECONDS,
     SLEEP_COLOR_RGB,
+    LIGHT_FEATURE_FLASH,
     SLEEP_EXIT_BLINK_SECONDS,
     SLEEP_EXIT_BLINKS,
+    SLEEP_EXIT_EFFECT_SECONDS,
+    SLEEP_EXIT_EFFECT_STOPS,
+    SLEEP_EXIT_EFFECTS,
     SLEEP_EXIT_RGB_COLOR,
     SLEEP_COLOR_TEMP,
     STORAGE_KEY_PREFIX,
@@ -855,7 +859,7 @@ class RoomManager:
         for entity_id in self._lights_on():
             color = self._sleep_exit_color_data(entity_id)
             if color is None:
-                # No color support: signal the end of Sleep mode by blinking.
+                # No color support: signal the end of Sleep mode another way.
                 to_blink.append(entity_id)
                 continue
             await self.hass.services.async_call(
@@ -864,7 +868,7 @@ class RoomManager:
                 blocking=False,
             )
         if to_blink:
-            self.hass.async_create_task(self._blink_sleep_exit(to_blink))
+            self.hass.async_create_task(self._signal_sleep_exit(to_blink))
         self._sleep_exit_cancel = async_call_later(
             self.hass, LUX_SETTLE_SECONDS, self._sleep_exit_wait_over
         )
@@ -879,6 +883,64 @@ class RoomManager:
         if modes & {"hs", "xy", "rgb", "rgbw", "rgbww"}:
             return {ATTR_RGB_COLOR: list(SLEEP_EXIT_RGB_COLOR)}
         return None
+
+    async def _signal_sleep_exit(self, entity_ids: list[str]) -> None:
+        """Signal the end of Sleep mode on lights without color support.
+
+        In order of preference: a light effect run for a few seconds, the
+        light's own flash, or three plain off/on blinks.
+        """
+        with_effect: dict[str, tuple[str, str | None]] = {}
+        to_flash: list[str] = []
+        to_blink: list[str] = []
+        for entity_id in entity_ids:
+            state = self.hass.states.get(entity_id)
+            attrs = state.attributes if state else {}
+            effects = {
+                str(effect).lower(): effect
+                for effect in (attrs.get("effect_list") or [])
+            }
+            start = next(
+                (effects[name] for name in SLEEP_EXIT_EFFECTS if name in effects),
+                None,
+            )
+            if start is not None:
+                stop = next(
+                    (effects[name] for name in SLEEP_EXIT_EFFECT_STOPS if name in effects),
+                    None,
+                )
+                with_effect[entity_id] = (start, stop)
+            elif int(attrs.get("supported_features") or 0) & LIGHT_FEATURE_FLASH:
+                to_flash.append(entity_id)
+            else:
+                to_blink.append(entity_id)
+
+        for entity_id, (start, _stop) in with_effect.items():
+            await self.hass.services.async_call(
+                "light", "turn_on",
+                {ATTR_ENTITY_ID: entity_id, "effect": start},
+                blocking=False,
+            )
+        if to_flash:
+            await self.hass.services.async_call(
+                "light", "turn_on",
+                {ATTR_ENTITY_ID: to_flash, "flash": "long"},
+                blocking=False,
+            )
+        if to_blink:
+            self.hass.async_create_task(self._blink_sleep_exit(to_blink))
+
+        if not with_effect:
+            return
+        await asyncio.sleep(SLEEP_EXIT_EFFECT_SECONDS)
+        for entity_id, (_start, stop) in with_effect.items():
+            if stop is None or not self._light_is_on(entity_id):
+                continue
+            await self.hass.services.async_call(
+                "light", "turn_on",
+                {ATTR_ENTITY_ID: entity_id, "effect": stop},
+                blocking=False,
+            )
 
     async def _blink_sleep_exit(self, entity_ids: list[str]) -> None:
         """Blink lights without color support, ending on at their brightness."""

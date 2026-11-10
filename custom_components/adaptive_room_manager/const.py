@@ -77,7 +77,13 @@ DEFAULT_SLEEP_RESTORE_TRANSITION = 3.0
 # after Sleep mode ended (while the sleep lights are held in SLEEP_EXIT_RGB_COLOR).
 LUX_SETTLE_SECONDS = 10
 SLEEP_EXIT_RGB_COLOR = (255, 140, 0)
-# Lights without color support blink instead.
+# Lights without color support run one of these effects (first one the light
+# offers) for a few seconds, then one of the stop effects if it offers any.
+# Without effects they use the light's own flash, without flash they blink.
+SLEEP_EXIT_EFFECTS = ("breathe", "blink", "pulse", "flash", "okay", "strobe")
+SLEEP_EXIT_EFFECT_STOPS = ("stop_effect", "finish_effect", "none", "off", "solid")
+SLEEP_EXIT_EFFECT_SECONDS = 3
+LIGHT_FEATURE_FLASH = 8  # LightEntityFeature.FLASH
 SLEEP_EXIT_BLINKS = 3
 SLEEP_EXIT_BLINK_SECONDS = 0.5
 
