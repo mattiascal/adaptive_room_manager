@@ -78,6 +78,7 @@ from .const import (
     DEFAULT_SYNC_ENTER_NIGHT,
     DOMAIN,
     ENTRY_TYPE_HOME,
+    LUX_SETTLE_SECONDS,
     SLEEP_COLOR_RGB,
     SLEEP_COLOR_TEMP,
     STORAGE_KEY_PREFIX,
@@ -115,6 +116,13 @@ class RoomManager:
         self._startup_completed = False
         self._restoring_lights = False
         self._absence_cancel = None
+        # Natural lux is not sampled right after a light went off: the sensor
+        # still reports the artificial light for a few seconds.
+        self._lux_settle_until = 0.0
+        self._lux_settle_cancel = None
+        # Delayed switch-off of tracked lights that came back on (after being
+        # unavailable) while the room is vacant.
+        self._orphan_sweep_cancel = None
         self._sleep_profile_applied = False
         # A normal Day/Evening/Night profile is applied at most once during an
         # occupancy cycle. This prevents a light switched off by the user from
@@ -242,13 +250,27 @@ class RoomManager:
         # The absence timer does not survive a restart. If lights of the Area are
         # still on, resume the occupancy cycle so the normal absence delay runs
         # again and switches them off once the room is confirmed empty.
-        self.auto_lights &= self._lights_on()
+        # A light that is still unavailable/unknown this early (slow integrations
+        # such as Zigbee2MQTT) is kept: only lights known to be off are dropped,
+        # so a light that comes back on later is still switched off.
+        self.auto_lights = {
+            entity_id
+            for entity_id in self.auto_lights
+            if not self._light_is_off(entity_id)
+        }
         area_lights = self._area_lights()
         self._area_light_ids = area_lights
-        self.turned_on_lights &= {
-            entity_id for entity_id in area_lights if self._light_is_on(entity_id)
+        self.turned_on_lights = {
+            entity_id
+            for entity_id in self.turned_on_lights & area_lights
+            if not self._light_is_off(entity_id)
         }
-        if (self.auto_lights or self.turned_on_lights) and not self.sleep_mode:
+        tracked_on = {
+            entity_id
+            for entity_id in self.auto_lights | self.turned_on_lights
+            if self._light_is_on(entity_id)
+        }
+        if tracked_on and not self.sleep_mode:
             self.occupied = True
             self._lighting_profile_applied = True
 
@@ -274,6 +296,12 @@ class RoomManager:
             remove_listener()
         self.listeners.clear()
         self._cancel_absence_timer()
+        if self._lux_settle_cancel is not None:
+            self._lux_settle_cancel()
+            self._lux_settle_cancel = None
+        if self._orphan_sweep_cancel is not None:
+            self._orphan_sweep_cancel()
+            self._orphan_sweep_cancel = None
         if self._storage_save_cancel is not None:
             self._storage_save_cancel()
             self._storage_save_cancel = None
@@ -291,8 +319,10 @@ class RoomManager:
     @callback
     def _state_changed(self, event) -> None:
         entity_id = event.data.get("entity_id")
-        if entity_id in self._area_light_ids:
+        if entity_id in self._area_light_ids or entity_id in self.auto_lights:
             self._track_turned_on(event)
+        if entity_id in self._all_lights() or entity_id in self._area_light_ids:
+            self._hold_natural_lux_if_switched_off(event)
         if entity_id in self._all_lights() and not self._restoring_lights:
             self._capture_light_state(entity_id)
             self._schedule_persistent_state_save()
@@ -383,6 +413,15 @@ class RoomManager:
         state = self.hass.states.get(entity_id)
         return state is not None and state.state == STATE_ON
 
+    def _light_is_off(self, entity_id: str) -> bool:
+        state = self.hass.states.get(entity_id)
+        return state is not None and state.state == STATE_OFF
+
+    def _light_is_lost(self, entity_id: str) -> bool:
+        """Return whether a light cannot currently receive a command."""
+        state = self.hass.states.get(entity_id)
+        return state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+
     @callback
     def _track_turned_on(self, event) -> None:
         """Remember an Area light switched on, forget it once it is off."""
@@ -396,20 +435,87 @@ class RoomManager:
                 self.turned_on_lights.discard(entity_id)
                 self._schedule_persistent_state_save()
             return
+        if new.state != STATE_ON or (old is not None and old.state == STATE_ON):
+            return
+        # A light that reappears already on (it was unavailable or unknown, for
+        # example while Home Assistant or its integration restarted) is tracked
+        # like one that was switched on.
+        returned = old is None or old.state in (STATE_UNAVAILABLE, STATE_UNKNOWN)
         if (
-            new.state == STATE_ON
-            and old is not None
-            and old.state == STATE_OFF
+            entity_id in self._area_light_ids
             and entity_id not in self.auto_lights
             and entity_id not in self.turned_on_lights
         ):
             self.turned_on_lights.add(entity_id)
             self._schedule_persistent_state_save()
+        if returned:
+            self._schedule_orphan_sweep()
+
+    @callback
+    def _schedule_orphan_sweep(self) -> None:
+        """Switch off returned lights after the absence delay if the room is vacant.
+
+        Outside an occupancy cycle no vacancy event will ever fire, so a tracked
+        light that comes back on in an empty room would stay on until the next
+        presence. Sleep mode is left alone: its lights are meant to stay on.
+        """
+        if not self._startup_completed or self.occupied or self.sleep_mode:
+            return
+        if self._orphan_sweep_cancel is not None:
+            self._orphan_sweep_cancel()
+        self._orphan_sweep_cancel = async_call_later(
+            self.hass, self.absence_delay, self._orphan_sweep
+        )
+
+    @callback
+    def _orphan_sweep(self, _now) -> None:
+        self._orphan_sweep_cancel = None
+        if (
+            self.occupied
+            or self.sleep_mode
+            or not self.enabled
+            or self.mode == "disabled"
+        ):
+            return
+        tracked = self.auto_lights | self.turned_on_lights
+        to_off = {entity_id for entity_id in tracked if self._light_is_on(entity_id)}
+        if not to_off:
+            return
+        self.auto_lights.difference_update(to_off)
+        self.turned_on_lights.difference_update(to_off)
+        self._schedule_persistent_state_save()
+        self.hass.async_create_task(
+            self.hass.services.async_call(
+                "light", "turn_off", {ATTR_ENTITY_ID: list(to_off)}, blocking=False
+            )
+        )
+
+    @callback
+    def _hold_natural_lux_if_switched_off(self, event) -> None:
+        """Pause natural-lux sampling for a moment after a light went off."""
+        old = event.data.get("old_state")
+        new = event.data.get("new_state")
+        if old is None or new is None:
+            return
+        if old.state != STATE_ON or new.state != STATE_OFF:
+            return
+        self._lux_settle_until = self.hass.loop.time() + LUX_SETTLE_SECONDS
+        if self._lux_settle_cancel is not None:
+            self._lux_settle_cancel()
+        self._lux_settle_cancel = async_call_later(
+            self.hass, LUX_SETTLE_SECONDS + 1, self._lux_settled
+        )
+
+    @callback
+    def _lux_settled(self, _now) -> None:
+        self._lux_settle_cancel = None
+        self.hass.async_create_task(self.async_evaluate())
 
     @callback
     def _area_light_changed(self, event) -> None:
         """Area light not configured in any profile: only track it."""
         self._track_turned_on(event)
+        self._hold_natural_lux_if_switched_off(event)
 
     def _lights_on(self) -> set[str]:
         return {
@@ -631,18 +737,56 @@ class RoomManager:
         self.sleep_reason = "Sleep mode inactive"
         self._sleep_profile_applied = False
         self._update_presence(schedule_timer=False)
+
+        triggers, persistent = self._active_presence()
+        if self.occupied and not (triggers or persistent):
+            # The room was only being held by the (long) sleep absence delay.
+            # With no sensor active it is empty: end the occupancy cycle now
+            # instead of restoring lights for nobody.
+            self.occupied = False
+            self.presence_reason = "Sleep ended with no active presence sensors"
+            self._lighting_profile_applied = False
+            self.manual_overrides.clear()
+
         self._update_light_need()
 
         if self.occupied and self.light_needed:
             await self._restore_light_snapshot()
+            # Whatever stays on after Sleep mode belongs to this occupancy cycle
+            # and is switched off on vacancy, also when Sleep mode itself (or a
+            # restart during the night) had dropped it from the tracked set.
+            restored_on = {
+                entity_id
+                for entity_id, saved in self._sleep_snapshot.items()
+                if saved.get("state") == STATE_ON
+            }
+            restored_off = set(self._sleep_snapshot) - restored_on
+            self.auto_lights.update(
+                ((self._lights_on() | restored_on) - restored_off)
+                - self.manual_overrides
+            )
+            self._schedule_persistent_state_save()
             self.light_reason = "Restored pre-sleep state of changed lights"
         else:
-            await self._turn_off_all_lights(
-                float(self.config.get(
-                    CONF_SLEEP_RESTORE_TRANSITION,
-                    DEFAULT_SLEEP_RESTORE_TRANSITION,
-                ))
-            )
+            transition = float(self.config.get(
+                CONF_SLEEP_RESTORE_TRANSITION,
+                DEFAULT_SLEEP_RESTORE_TRANSITION,
+            ))
+            await self._turn_off_all_lights(transition)
+            if not self.occupied and self.enabled and self.mode != "disabled":
+                # Same Area sweep as a normal vacancy.
+                leftover = {
+                    entity_id
+                    for entity_id in self.turned_on_lights
+                    if self._light_is_on(entity_id)
+                }
+                self.turned_on_lights -= leftover
+                if leftover:
+                    await self.hass.services.async_call(
+                        "light", "turn_off",
+                        {ATTR_ENTITY_ID: list(leftover), "transition": transition},
+                        blocking=False,
+                    )
             self.light_reason = "Sleep ended; lighting not needed"
 
         self._sleep_snapshot = {}
@@ -759,7 +903,13 @@ class RoomManager:
                     for entity_id in self.turned_on_lights
                     if self._light_is_on(entity_id)
                 }
-                self.turned_on_lights.clear()
+                # A light that cannot be reached now stays tracked, so it is
+                # switched off if it comes back on.
+                self.turned_on_lights = {
+                    entity_id
+                    for entity_id in self.turned_on_lights
+                    if self._light_is_lost(entity_id)
+                }
                 if leftover:
                     await self.hass.services.async_call(
                         "light", "turn_off", {ATTR_ENTITY_ID: list(leftover)},
@@ -842,7 +992,8 @@ class RoomManager:
             except (TypeError, ValueError, AttributeError):
                 continue
 
-        if not lights_on and lux_values:
+        lux_settled = self.hass.loop.time() >= self._lux_settle_until
+        if not lights_on and lux_values and lux_settled:
             self.last_natural_lux = sum(lux_values) / len(lux_values)
 
         valid_covers = []
@@ -967,7 +1118,13 @@ class RoomManager:
             await self.hass.services.async_call(
                 "light", "turn_off", {ATTR_ENTITY_ID: list(to_off)}, blocking=False
             )
-            self.auto_lights.difference_update(to_off)
+            self.auto_lights.difference_update(
+                {
+                    entity_id
+                    for entity_id in to_off
+                    if not self._light_is_lost(entity_id)
+                }
+            )
         if self.auto_lights != auto_before:
             self._schedule_persistent_state_save()
 

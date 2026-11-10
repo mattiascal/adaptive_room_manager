@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.6
+
+- Leaving Sleep mode with no presence sensor active now ends the occupancy cycle immediately: the room was only being held by the Sleep absence delay, so all managed lights (and tracked Area lights) are switched off instead of being restored or switched on for an empty room.
+- Lights left on after Sleep mode ends in an occupied room are now tracked and switched off on vacancy, even if Sleep mode or a restart during the night had dropped them from the tracked set.
+- Restart handling: lights still unavailable/unknown when ARM starts are no longer dropped from the tracked set, a light that reappears already on is tracked, and if the room is vacant it is switched off after the absence delay. Lights that cannot be reached at vacancy stay tracked.
+- Natural illuminance is no longer sampled during the 30 seconds after a light goes off. This fixes lights being switched back on right after ARM turned them off, because the lux sensor still reported the artificial light.
+
 ## 0.6.5
 
 - Fixed room lights staying on after vacancy when they were already on at the start of an occupancy cycle (switched on by hand, by another automation, or left on). Lights of the active profile that are already on are now adopted and switched off when the room becomes vacant.

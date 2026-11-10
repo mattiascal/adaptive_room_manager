@@ -4,7 +4,7 @@ DOMAIN = "adaptive_room_manager"
 NAME = "Adaptive Room Manager"
 MANUFACTURER = "Adaptive Room Manager"
 MODEL = "Adaptive Room"
-VERSION = "0.6.4"
+VERSION = "0.6.6"
 PLATFORMS = ["binary_sensor", "sensor", "switch", "number", "select"]
 
 CONF_ENTRY_TYPE = "entry_type"
@@ -67,6 +67,9 @@ DEFAULT_SLEEP_ABSENCE_DELAY = 30
 DEFAULT_SLEEP_AUTO_OFF = False
 DEFAULT_SLEEP_TRANSITION = 3.0
 DEFAULT_SLEEP_RESTORE_TRANSITION = 3.0
+
+# Seconds to wait after a light went off before a lux reading counts as natural.
+LUX_SETTLE_SECONDS = 30
 
 STORAGE_VERSION = 1
 STORAGE_KEY_PREFIX = f"{DOMAIN}.sleep"
