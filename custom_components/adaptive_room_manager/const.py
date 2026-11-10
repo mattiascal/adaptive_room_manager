@@ -73,8 +73,13 @@ DEFAULT_SLEEP_AUTO_OFF = False
 DEFAULT_SLEEP_TRANSITION = 3.0
 DEFAULT_SLEEP_RESTORE_TRANSITION = 3.0
 
-# Seconds to wait after a light went off before a lux reading counts as natural.
-LUX_SETTLE_SECONDS = 5
+# Seconds to wait before a lux reading is trusted: after a light went off, and
+# after Sleep mode ended (while the sleep lights are held in SLEEP_EXIT_RGB_COLOR).
+LUX_SETTLE_SECONDS = 10
+SLEEP_EXIT_RGB_COLOR = (255, 140, 0)
+# Lights without color support blink instead.
+SLEEP_EXIT_BLINKS = 3
+SLEEP_EXIT_BLINK_SECONDS = 0.5
 
 # Seconds during which a light coming on is attributed to ARM's own command.
 ARM_COMMAND_WINDOW_SECONDS = 15

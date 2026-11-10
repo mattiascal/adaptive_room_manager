@@ -5,10 +5,10 @@
 - Switching Sleep mode off now resumes the room's normal lighting rules, as if someone had just entered. The room is occupied and a fresh lighting cycle starts; with no presence sensor active the normal absence delay runs and vacancy switches the lights off as usual. This replaces the 0.6.6 behavior (presence cleared at once when no sensor was active).
 - If lighting is needed, the lights that are not part of the current Day/Evening/Night profile are switched off and the profile lights are switched on with a plain `light.turn_on`, so Adaptive Lighting (or the light itself) decides brightness and color. The pre-sleep state of the lights is no longer restored.
 - If lighting is not needed, all managed lights are switched off and presence stays active.
-- The stored natural illuminance is refreshed when Sleep mode ends instead of reusing the value from the evening before; if that reading was inflated by the sleep lights it is sampled again once they are off.
+- When Sleep mode ends in the Day or Evening period, the sleep lights first stay on for 10 seconds at their brightness, recolored orange (lights without color support blink three times instead). Then the lux sensors are read and the decision above is taken on that reading instead of the value stored the evening before. If the reading was inflated by the sleep lights it is sampled again once they are off. In the Night period, after a manual switch-on, or without lux sensors there is no wait.
 - Automatic Sleep mode exit on vacancy still switches everything off without assuming presence.
 - A light of the room switched on by hand while the room is occupied now counts as a request for lighting: for the rest of the occupancy cycle lighting is considered needed (Lighting reason: `Light switched on manually`) and the current profile is applied if it was not yet. A light switched on by hand during Sleep mode makes the profile lights come on when Sleep mode ends. Lights switched on by ARM itself or by another automation or script do not count. Cleared on vacancy and when Sleep mode starts.
-- The wait before a lux reading counts as natural after a light goes off is now 5 seconds (was 30). Sensors that report only on motion or every several minutes simply update the stored value at their next report.
+- The wait before a lux reading counts as natural after a light goes off is now 10 seconds (was 30). Sensors that report only on motion or every several minutes simply update the stored value at their next report.
 
 ## 0.6.7
 

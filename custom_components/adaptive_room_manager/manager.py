@@ -1,6 +1,8 @@
 """Event-driven room controller."""
 from __future__ import annotations
 
+import asyncio
+
 from datetime import time
 from typing import Any
 
@@ -85,6 +87,9 @@ from .const import (
     ENTRY_TYPE_HOME,
     LUX_SETTLE_SECONDS,
     SLEEP_COLOR_RGB,
+    SLEEP_EXIT_BLINK_SECONDS,
+    SLEEP_EXIT_BLINKS,
+    SLEEP_EXIT_RGB_COLOR,
     SLEEP_COLOR_TEMP,
     STORAGE_KEY_PREFIX,
     STORAGE_VERSION,
@@ -135,6 +140,10 @@ class RoomManager:
         # during Sleep mode): the room is too dark for them, whatever the lux
         # sensor says. Cleared on vacancy and when Sleep mode starts.
         self.manual_light_request = False
+        # Sleep mode just ended and the lighting decision is waiting for a lux
+        # reading: the sleep lights stay on, recolored, until the timer fires.
+        self._sleep_exit_pending = False
+        self._sleep_exit_cancel = None
         # Lights ARM itself just asked to switch on, with the expiry of that
         # expectation, so its own commands are not mistaken for manual ones.
         self._expected_on: dict[str, float] = {}
@@ -335,6 +344,7 @@ class RoomManager:
         if self._lux_settle_cancel is not None:
             self._lux_settle_cancel()
             self._lux_settle_cancel = None
+        self._cancel_sleep_exit_wait()
         if self._orphan_sweep_cancel is not None:
             self._orphan_sweep_cancel()
             self._orphan_sweep_cancel = None
@@ -794,6 +804,7 @@ class RoomManager:
     async def _enter_sleep_mode(self) -> None:
         self.sleep_mode = True
         self.manual_light_request = False
+        self._cancel_sleep_exit_wait()
         # Snapshot only entities that will actually receive a sleep-mode command.
         self._sleep_snapshot = self._capture_sleep_snapshot()
         self.sleep_reason = "Enabled by the room Sleep mode switch"
@@ -820,8 +831,107 @@ class RoomManager:
             self.presence_reason = "Sleep mode ended"
         self.manual_overrides.clear()
 
-        self._sample_lux_leaving_sleep()
         self._update_light_need()
+        self._sleep_snapshot = {}
+
+        lux_decides = (
+            self.occupied
+            and self.period() != "night"
+            and not self.manual_light_request
+            and bool(self.config.get(CONF_LUX, []))
+        )
+        if not lux_decides:
+            # Vacant room (automatic exit), Night period, a light switched on by
+            # hand during the night, or no lux sensor: nothing to wait for.
+            await self._apply_sleep_exit_lighting()
+            await self._save_sleep_state()
+            return
+
+        # Keep the sleep lights on, at their brightness but in a different
+        # color, for a few seconds: a signal that Sleep mode has ended while
+        # the lux sensor gets the time to report. Then decide.
+        self._sleep_exit_pending = True
+        to_blink: list[str] = []
+        for entity_id in self._lights_on():
+            color = self._sleep_exit_color_data(entity_id)
+            if color is None:
+                # No color support: signal the end of Sleep mode by blinking.
+                to_blink.append(entity_id)
+                continue
+            await self.hass.services.async_call(
+                "light", "turn_on",
+                {ATTR_ENTITY_ID: entity_id, "transition": 1, **color},
+                blocking=False,
+            )
+        if to_blink:
+            self.hass.async_create_task(self._blink_sleep_exit(to_blink))
+        self._sleep_exit_cancel = async_call_later(
+            self.hass, LUX_SETTLE_SECONDS, self._sleep_exit_wait_over
+        )
+        await self._save_sleep_state()
+
+    def _sleep_exit_color_data(self, entity_id: str) -> dict[str, Any] | None:
+        """Orange for lights that support color, None for the others."""
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return None
+        modes = set(state.attributes.get("supported_color_modes") or [])
+        if modes & {"hs", "xy", "rgb", "rgbw", "rgbww"}:
+            return {ATTR_RGB_COLOR: list(SLEEP_EXIT_RGB_COLOR)}
+        return None
+
+    async def _blink_sleep_exit(self, entity_ids: list[str]) -> None:
+        """Blink lights without color support, ending on at their brightness."""
+        brightness: dict[str, Any] = {}
+        for entity_id in entity_ids:
+            state = self.hass.states.get(entity_id)
+            brightness[entity_id] = (
+                state.attributes.get(ATTR_BRIGHTNESS) if state else None
+            )
+        for _ in range(SLEEP_EXIT_BLINKS):
+            if not self._sleep_exit_pending:
+                return
+            await self.hass.services.async_call(
+                "light", "turn_off",
+                {ATTR_ENTITY_ID: entity_ids, "transition": 0},
+                blocking=False,
+            )
+            await asyncio.sleep(SLEEP_EXIT_BLINK_SECONDS)
+            if not self._sleep_exit_pending:
+                return
+            self._expect_on(entity_ids)
+            for entity_id in entity_ids:
+                data: dict[str, Any] = {ATTR_ENTITY_ID: entity_id, "transition": 0}
+                if brightness[entity_id] is not None:
+                    data[ATTR_BRIGHTNESS] = brightness[entity_id]
+                await self.hass.services.async_call(
+                    "light", "turn_on", data, blocking=False
+                )
+            await asyncio.sleep(SLEEP_EXIT_BLINK_SECONDS)
+
+    def _cancel_sleep_exit_wait(self) -> None:
+        self._sleep_exit_pending = False
+        if self._sleep_exit_cancel is not None:
+            self._sleep_exit_cancel()
+            self._sleep_exit_cancel = None
+
+    @callback
+    def _sleep_exit_wait_over(self, _now) -> None:
+        self._sleep_exit_cancel = None
+        self.hass.async_create_task(self._async_finish_sleep_exit())
+
+    async def _async_finish_sleep_exit(self) -> None:
+        if not self._sleep_exit_pending or self.sleep_mode:
+            return
+        self._sleep_exit_pending = False
+        if not self.manual_light_request:
+            self._sample_lux_leaving_sleep()
+        self._update_light_need()
+        await self._apply_sleep_exit_lighting()
+        await self.async_evaluate()
+
+    async def _apply_sleep_exit_lighting(self) -> None:
+        """Apply the normal lighting rules once Sleep mode has ended."""
         transition = float(self.config.get(
             CONF_SLEEP_RESTORE_TRANSITION,
             DEFAULT_SLEEP_RESTORE_TRANSITION,
@@ -872,9 +982,6 @@ class RoomManager:
                         {ATTR_ENTITY_ID: list(leftover), "transition": transition},
                         blocking=False,
                     )
-
-        self._sleep_snapshot = {}
-        await self._save_sleep_state()
 
     def _sample_lux_leaving_sleep(self) -> None:
         """Refresh the stored lux when Sleep mode ends.
@@ -959,6 +1066,10 @@ class RoomManager:
         self._lighting_profile_applied = False
         self.manual_overrides.clear()
         self.manual_light_request = False
+        if self._sleep_exit_pending:
+            # Vacant before the lux reading was taken: nothing left to decide.
+            self._cancel_sleep_exit_wait()
+            await self._turn_off_all_lights()
         if self.sleep_mode:
             await self._turn_off_all_lights(
                 float(self.config.get(CONF_SLEEP_TRANSITION, DEFAULT_SLEEP_TRANSITION))
@@ -1167,6 +1278,9 @@ class RoomManager:
         self, *, current_period: str | None = None, period_changed: bool = False
     ) -> None:
         if not self.enabled or self.mode == "disabled" or self.sleep_mode:
+            return
+        if self._sleep_exit_pending:
+            # The lights are being held until the lux reading after Sleep mode.
             return
 
         groups = {
